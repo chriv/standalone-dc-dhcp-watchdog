@@ -16,6 +16,35 @@ Adding `NTDS` to DHCPServer's service dependencies doesn't help. Windows
 counts NTDS as started as soon as its process is up, which is well before
 the directory answers queries.
 
+### Why it shows up after snapshot restores, not reboots
+
+The race mostly appears when the DC starts from a **restored snapshot or a
+clone**, for example a lab VM that reverts to a snapshot each time. An
+ordinary reboot usually comes up fast enough that DHCP's first check
+succeeds. **Testing with a reboot won't reproduce the problem.** Test by
+reverting to the snapshot.
+
+*Why Windows knows, and why it cares:* since Windows Server 2012,
+hypervisors (Hyper-V, VMware, KVM/QEMU, Proxmox) give each VM a
+**VM-Generation ID** that changes when the VM is restored from a snapshot
+or cloned. AD stores the ID and compares it at every boot. When it changes
+(Directory Service event **2170**), the DC assumes it may have gone back in
+time, so it protects the rest of the domain:
+
+- It takes a new **invocation ID**. Otherwise it would reuse update sequence
+  numbers its replication partners have already seen, and they'd silently
+  ignore its new changes (a "USN rollback").
+- It discards its **RID pool**, so it can't issue account SIDs it handed out
+  before the rollback.
+- It treats itself as needing to **resync** with a partner before it's fully
+  ready.
+
+With several DCs, this prevents real corruption. With a single DC, there's
+nothing to diverge from, but the extra startup work still runs on every
+restore. That delay is the window where DHCP's authorization check fails.
+`-SingleDcFix` (below) removes the wait for a replication partner that
+doesn't exist, and the watchdog covers whatever delay is left.
+
 ## What it does
 
 `DhcpWatchdog.ps1` runs as SYSTEM from a scheduled task:
